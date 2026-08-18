@@ -72,7 +72,7 @@ def run_distance_decay_experiment(seq_len: int = 128, d_model: int = 64):
     plt.legend(fontsize=11)
     plt.grid(True, linestyle=":", alpha=0.6)
     
-    output_plot = "decay_plot.png"
+    output_plot = "assets/decay_plot.png"
     plt.savefig(output_plot, dpi=300, bbox_inches="tight")
     print(f"✅ Benchmark complete! Plot successfully generated and saved to '{output_plot}'.")
 
