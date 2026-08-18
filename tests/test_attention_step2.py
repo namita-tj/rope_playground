@@ -1,50 +1,45 @@
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 import torch
-from attention import CustomMultiHeadAttention
+from transformers import AutoTokenizer, AutoModel
 
+def inspect_attention_heads(sentence: str, model_name: str = "bert-base-uncased", layer_idx: int = 0):
+    """
+    Extracts and outputs how each attention head in a specified layer 
+    attends across the tokens of an input sentence.
+    """
+    # 1. Load Tokenizer & Model with attention output enabled
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name, output_attentions=True)
+    model.eval()
 
-def test_attention_shapes_and_mechanics():
-    print("--- Testing Step 2: Multi-Head Attention ---")
+    # 2. Tokenize input
+    inputs = tokenizer(sentence, return_tensors="pt")
+    tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
     
-    batch_size = 2
-    seq_len = 10
-    d_model = 64
-    n_heads = 4
-    
-    x = torch.randn(batch_size, seq_len, d_model)
-    
-    attn_sin = CustomMultiHeadAttention(d_model=d_model, n_heads=n_heads, pos_type="sinusoidal")
-    out_sin, weights_sin = attn_sin(x)
-    
-    print(f"✅ Sinusoidal Output Shape: {out_sin.shape} (Expected: [{batch_size}, {seq_len}, {d_model}])")
-    print(f"✅ Sinusoidal Attention Weights Shape: {weights_sin.shape} (Expected: [{batch_size}, {n_heads}, {seq_len}, {seq_len}])")
-    
-    attn_rope = CustomMultiHeadAttention(d_model=d_model, n_heads=n_heads, pos_type="rope")
-    out_rope, weights_rope = attn_rope(x)
-    
-    print(f"✅ RoPE Output Shape: {out_rope.shape} (Expected: [{batch_size}, {seq_len}, {d_model}])")
-    print(f"✅ RoPE Attention Weights Shape: {weights_rope.shape} (Expected: [{batch_size}, {n_heads}, {seq_len}, {seq_len}])")
-    
-    out_causal, weights_causal = attn_rope(x, causal=True)
-    # Check that upper triangle of attention matrix is strictly zero
-    upper_tri_sum = torch.triu(weights_causal, diagonal=1).sum().item()
-    if upper_tri_sum == 0.0:
-        print("🎉 SUCCESS: Causal mask correctly blocked future tokens!")
-    else:
-        print("❌ ERROR: Causal mask leaked future token information.")
-        
-    loss = out_rope.sum()
-    loss.backward()
-    
-    has_grads = all(p.grad is not None and not torch.isnan(p.grad).any() for p in attn_rope.parameters())
-    if has_grads:
-        print("🎉 SUCCESS: Backpropagation completed with valid non-NaN gradients!")
-    else:
-        print("❌ ERROR: Gradient flow failed or produced NaNs.")
+    # 3. Forward pass (no gradient computation needed)
+    with torch.no_grad():
+        outputs = model(**inputs)
 
+    # outputs.attentions is a tuple of shape: (num_layers, batch_size, num_heads, seq_len, seq_len)
+    layer_attentions = outputs.attentions[layer_idx][0]  # Shape: (num_heads, seq_len, seq_len)
+    num_heads, seq_len, _ = layer_attentions.shape
+
+    print(f"Input Sentence: '{sentence}'")
+    print(f"Token Sequence ({seq_len}): {tokens}")
+    print(f"Model: {model_name} | Layer: {layer_idx} | Total Heads: {num_heads}")
+    print("=" * 65)
+
+    # 4. Parse per-head attention weights
+    for head_idx in range(num_heads):
+        head_matrix = layer_attentions[head_idx]  # Shape: (seq_len, seq_len)
+        print(f"\n[ Head {head_idx + 1} ]")
+
+        for i, src_token in enumerate(tokens):
+            # Find the token receiving the highest attention weight from src_token
+            max_weight, max_idx = torch.max(head_matrix[i], dim=0)
+            tgt_token = tokens[max_idx.item()]
+            print(f"  '{src_token}' ---> strongest focus on ---> '{tgt_token}' ({max_weight.item():.1%})")
 
 if __name__ == "__main__":
-    test_attention_shapes_and_mechanics()
+    # Test sentence
+    text = "The quick brown fox jumps over the lazy dog."
+    inspect_attention_heads(sentence=text, layer_idx=0)
