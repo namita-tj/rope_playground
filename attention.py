@@ -8,6 +8,7 @@ from positional_encodings import (
     get_sinusoidal_encoding,
     precompute_rope_frequencies,
     rope_slice,
+    scaled_rope_frequencies,
 )
 
 POS_TYPES = ("none", "sinusoidal", "rope", "alibi")
@@ -39,6 +40,14 @@ class CustomMultiHeadAttention(nn.Module):
             cos, sin = precompute_rope_frequencies(self.head_dim, max_seq_len)
             self.register_buffer("rope_cos", cos, persistent=False)
             self.register_buffer("rope_sin", sin, persistent=False)
+
+    def set_rope_scaling(self, method: str | None = None, factor: float = 1.0, original_max_len: int = 256) -> None:
+        """Swaps in stretched RoPE gears (PI, NTK or YaRN); method=None restores plain RoPE."""
+        if self.pos_type != "rope":
+            raise ValueError(f"RoPE scaling only applies to pos_type='rope', not {self.pos_type!r}")
+        cos, sin = scaled_rope_frequencies(self.head_dim, self.rope_cos.shape[0], method, factor, original_max_len)
+        self.rope_cos = cos.to(self.rope_cos.device)
+        self.rope_sin = sin.to(self.rope_sin.device)
 
     def forward(
         self, x: torch.Tensor, causal: bool = False, offset: int = 0, need_weights: bool = True
