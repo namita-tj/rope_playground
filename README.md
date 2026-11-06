@@ -40,8 +40,10 @@ i built this to be experimented with. clone it, break it, print the shapes.
 * **`attention.py`** — building custom Multi-Head Attention ($Q, K, V$ projections and causal masking) completely from scratch.
 * **`sandbox/play_custom_attention.py`** — a step-by-step trace of how a sentence splits across different attention heads.
 * **`sandbox/inspect_bert_heads.py`** — peek at which word each head of a real BERT model focuses on (needs `pip install transformers`).
-* **`experiment.py`** — the final boss. measures RoPE's long-term decay and saves the plot to `assets/decay_plot.png`.
-* **`tests/`** — 48 checks that the math is actually right (see below).
+* **`experiment.py`** — measures RoPE's long-term decay and saves the plot to `assets/decay_plot.png`.
+* **`model.py`, `data.py`, `train.py`** — a tiny GPT (~0.8M parameters) that reads Tiny Shakespeare one character at a time, plus its data and training loop.
+* **`study.py`** — the actual final boss. trains that GPT with 4 different ways of handling position and checks what happens when the text gets longer than anything it trained on (see below).
+* **`tests/`** — 95 checks that the math is actually right.
 
 ---
 
@@ -64,6 +66,7 @@ pip install -r requirements.txt
 # run the experiment and the tests
 python experiment.py
 pytest
+python study.py --quick   # mini version of the GPT study, ~1 min on a laptop
 ```
 
 ---
@@ -88,9 +91,43 @@ the same word loses about 70% of its score over 500 tokens: closer copies matter
 
 ---
 
+## (>_<) the GPT experiment: what happens with longer text?
+
+the decay plot is nice, but it's toy vectors. i wanted to see what actually happens inside a real (tiny) language model. so i trained the same little GPT four times on Tiny Shakespeare, changing only how it knows where each character sits:
+
+* **none**: no position info at all. only the causal mask (you can't peek at future characters) hints at order.
+* **sinusoidal**: the 2017 waves, added once to the input.
+* **RoPE**: the clock hands from above, inside every attention layer (what llama uses).
+* **ALiBi**: no positions at all, just a penalty on attention that grows with distance (what BLOOM uses).
+
+every model trained on 256-character snippets. then i tested each one on text 2x, 4x and 8x longer than it had ever seen. 3 seeds each, so 12 training runs on a free colab GPU (about 3 min each).
+
+![perplexity vs text length](assets/length_generalization.png)
+
+perplexity is roughly "how many characters is the model torn between" (lower is better):
+
+| method | 256 (trained) | 512 (2x) | 1024 (4x) | 2048 (8x) |
+| :--- | ---: | ---: | ---: | ---: |
+| none | 5.49 | 6.88 | 11.91 | 19.58 |
+| sinusoidal | 4.73 | 10.17 | 19.09 | 26.96 |
+| RoPE | **4.39** | 7.36 | 17.09 | 30.56 |
+| ALiBi | 4.47 | **4.43** | **4.40** | **4.39** |
+
+averages over 3 seeds. the spread is tiny at the training length (±0.03–0.04) and grows for the methods that break down. full numbers in [`results/summary.md`](results/summary.md).
+
+what i had predicted, and what actually happened:
+
+* **"RoPE ≥ sinusoidal > none at the training length"**: yes. RoPE is the best reader on text the length it trained on, ALiBi is right behind it, and having no position info at all costs the most.
+* **"everything gets worse beyond the training length, ALiBi the least"**: half wrong, in a good way. ALiBi doesn't get worse at all. it gets very slightly *better* with more context. RoPE, the best model at 256 characters, falls apart the hardest: almost 7x worse at 8x the length.
+* **the surprise**: the model with *no* position info degrades less than both sinusoidal and RoPE (3.6x vs 5.7x and 7x). my guess: it never learned to depend on exact positions, so it has less to lose when they go out of range. but its results also jump around a lot between seeds, so i wouldn't lean on that too hard.
+
+this is exactly why real models can't just be run on longer text than they trained on. the next step (session 3) is to try the tricks that llama and qwen use to stretch RoPE to longer contexts (position interpolation, NTK scaling and YaRN) and see how much of that damage they undo.
+
+one thing i learned the hard way: in my first version, sinusoidal looked terrible (perplexity ~28 vs ~11 in a quick check). it wasn't the method. the waves were way louder than the word vectors (up to 50x) and drowned them out. i tested three ways of scaling them, picked the one that trained best, and used the same setup for every method. one scaling detail changed the result by almost 3x, which is a good reminder to check the setup before trusting a comparison.
+
 ## [v] is the math actually right?
 
-`pytest` runs 48 checks, including:
+`pytest` runs 95 checks, including:
 
 * **RoPE's defining property:** the score between positions *m* and *n* only depends on *m − n* (shift both by 1000 and nothing changes).
 * **rotation keeps vector length** — spinning never stretches a word.
