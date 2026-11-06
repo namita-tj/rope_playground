@@ -1,4 +1,4 @@
-name: Model Component Unit Tests
+name: Tests
 
 on:
   push:
@@ -6,25 +6,31 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout Code
+      - name: Check out code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
+          cache: pip
 
-      - name: Install Dependencies
+      - name: Install dependencies (CPU-only PyTorch, much smaller download)
         run: |
           python -m pip install --upgrade pip
-          pip install torch numpy pytest
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
 
-      - name: Run PyTest Verification Suite
-        run: |
-          # Verifies RoPE vector norm preservation & tensor shapes
-          pytest sandbox/test_encodings.py
+      - name: Run tests
+        # Encodings vs reference formulas, attention vs PyTorch's built-in kernel,
+        # causal masking, and the decay experiment's numbers.
+        run: pytest -v
