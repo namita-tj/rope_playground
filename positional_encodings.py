@@ -23,15 +23,38 @@ def get_sinusoidal_encoding(seq_len: int, d_model: int) -> torch.Tensor:
 # =========================================================================
 # THE MODERN REVOLUTION: ROTARY POSITION EMBEDDINGS (RoPE)
 # =========================================================================
-def precompute_rope_frequencies(dim: int, max_seq_len: int = 1024):
+def precompute_rope_frequencies(dim: int, max_seq_len: int = 1024, base: float = 10000.0):
     """
     Building the gears for our clock hands.
     Pre-calculates "how much to spin" for every possible position.
+
+    Returns (cos, sin), each shaped [max_seq_len, dim // 2]: one row per position,
+    one column per pair of dimensions. `base` sets how slowly the slowest hand turns
+    (context-extension tricks like NTK scaling work by changing it).
     """
-    inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+    if dim % 2 != 0:
+        raise ValueError(f"RoPE needs an even dimension to form pairs, got {dim}")
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
     t = torch.arange(max_seq_len, dtype=torch.float)
     freqs = torch.outer(t, inv_freq)
     return torch.cos(freqs), torch.sin(freqs)
+
+
+def rope_slice(cos: torch.Tensor, sin: torch.Tensor, seq_len: int, offset: int = 0):
+    """
+    Picks the gears for positions [offset, offset + seq_len).
+
+    The precomputed table covers max_seq_len positions, but a real sentence is
+    usually shorter. `offset` is where the sentence starts, e.g. when generating
+    one token at a time with a KV cache.
+    """
+    end = offset + seq_len
+    if offset < 0 or end > cos.shape[0]:
+        raise ValueError(
+            f"positions {offset}..{end - 1} are outside the precomputed table "
+            f"(max_seq_len={cos.shape[0]})"
+        )
+    return cos[offset:end], sin[offset:end]
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """
@@ -116,4 +139,7 @@ if __name__ == "__main__":
         print(f"  => 'apple' coords: [{vec[0]:+0.4f}, {vec[1]:+0.4f}] (Length stays {length:.4f}!)")
         print(f"  => Distance: {pos} steps apart | ATTENTION SCORE: {attention_score:.4f}\n")
         
-    print("task complete. you just proved that RoPE decays attention over distance! (>_o)\n")
+    print("task complete. the score changed with distance only, while 'apple' kept its length! (>_o)")
+    print("plot twist: in 2D there is just ONE clock hand, so keep rolling and the score swings back up.")
+    print("real models spin many hands at different speeds; averaged together, *that* is what makes")
+    print("far-away words matter less. run `python experiment.py` to see the real decay.\n")

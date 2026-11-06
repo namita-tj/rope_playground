@@ -1,49 +1,117 @@
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+"""Checks that the positional encodings do what the papers say they do."""
 
+import math
+
+import pytest
 import torch
-from positional_encodings import get_sinusoidal_encoding, precompute_rope_frequencies, apply_rope
 
-def main():
-    print("\n>_ running sanity checks on encodings...\n")
-    
-    # 1. Test Sinusoidal Encodings Shape
-    seq_len = 10
-    d_model = 64
-    sin_pe = get_sinusoidal_encoding(seq_len, d_model)
-    print(f"[v] Sinusoidal Canvas Shape: {sin_pe.shape} (Expected: [10, 64])")
-    
-    # 2. Test RoPE Frequency Precomputation Shape
-    head_dim = 32
-    max_seq_len = 100
-    cos, sin = precompute_rope_frequencies(head_dim, max_seq_len)
-    
-    # Note: head_dim is 32, so we expect 16 pairs!
-    print(f"[v] RoPE Gears (Cos/Sin) Shape: {cos.shape} (Expected: [100, 16])")
-    
-    # 3. Test RoPE Application & Norm Preservation
-    # Create a dummy Query tensor: batch=1, heads=2, seq_len=5, head_dim=32
-    q = torch.randn(1, 2, 5, head_dim)
-    
-    # Slice our precomputed gears to match the sequence length of 5
-    cos_sliced = cos[:5, :]
-    sin_sliced = sin[:5, :]
-    
-    q_rotated = apply_rope(q, cos_sliced, sin_sliced)
-    print(f"[v] Rotated Queries Shape: {q_rotated.shape} (Expected: [1, 2, 5, 32])")
-    
-    # Check that magnitude (norm) is preserved across all vectors
-    norm_before = torch.norm(q, dim=-1)
-    norm_after = torch.norm(q_rotated, dim=-1)
-    
-    print("\n(0_o) checking if the carousel broke any words...")
-    
-    # allclose checks if every single number matches perfectly (within a tiny 1e-5 margin of error)
-    if torch.allclose(norm_before, norm_after, atol=1e-5):
-        print("🎉 SUCCESS: RoPE perfectly preserved vector lengths (meaning is safe)!\n")
-    else:
-        print("❌ ERROR: Vector lengths changed during rotation. The words lost their meaning.\n")
+from positional_encodings import apply_rope, get_sinusoidal_encoding, precompute_rope_frequencies, rope_slice
 
-if __name__ == "__main__":
-    main()
+torch.manual_seed(0)
+
+
+# ── Sinusoidal ────────────────────────────────────────────────────────────────
+def test_sinusoidal_shape_and_range():
+    pe = get_sinusoidal_encoding(50, 64)
+    assert pe.shape == (50, 64)
+    assert pe.abs().max() <= 1.0
+
+
+def test_sinusoidal_known_values():
+    pe = get_sinusoidal_encoding(4, 8)
+    # Position 0: every sin is 0 and every cos is 1
+    assert torch.allclose(pe[0, 0::2], torch.zeros(4))
+    assert torch.allclose(pe[0, 1::2], torch.ones(4))
+    # Position 1, fastest wave: sin(1) and cos(1)
+    assert pe[1, 0].item() == pytest.approx(math.sin(1.0), abs=1e-6)
+    assert pe[1, 1].item() == pytest.approx(math.cos(1.0), abs=1e-6)
+
+
+# ── RoPE tables ───────────────────────────────────────────────────────────────
+def test_rope_table_shape():
+    cos, sin = precompute_rope_frequencies(32, 100)
+    assert cos.shape == sin.shape == (100, 16)
+
+
+def test_rope_rejects_odd_dimension():
+    with pytest.raises(ValueError):
+        precompute_rope_frequencies(31, 10)
+
+
+def test_rope_slice_bounds():
+    cos, sin = precompute_rope_frequencies(8, 10)
+    c, s = rope_slice(cos, sin, seq_len=4, offset=3)
+    assert torch.equal(c, cos[3:7]) and torch.equal(s, sin[3:7])
+    with pytest.raises(ValueError):
+        rope_slice(cos, sin, seq_len=4, offset=7)
+
+
+# ── RoPE behaviour ────────────────────────────────────────────────────────────
+def _rotate_at(x: torch.Tensor, position: int, dim: int, table_len: int = 4096) -> torch.Tensor:
+    """Applies RoPE to a single vector as if it stood at `position`."""
+    cos, sin = precompute_rope_frequencies(dim, table_len)
+    c, s = rope_slice(cos, sin, 1, position)
+    return apply_rope(x.view(1, 1, 1, dim), c, s).view(dim)
+
+
+def test_rope_preserves_length():
+    cos, sin = precompute_rope_frequencies(32, 20)
+    q = torch.randn(2, 3, 20, 32)
+    rotated = apply_rope(q, cos, sin)
+    assert rotated.shape == q.shape
+    assert torch.allclose(rotated.norm(dim=-1), q.norm(dim=-1), atol=1e-5)
+
+
+def test_rope_position_zero_is_identity():
+    q = torch.randn(64)
+    assert torch.allclose(_rotate_at(q, 0, 64), q)
+
+
+@pytest.mark.parametrize(("m", "n", "shift"), [(2, 5, 100), (0, 37, 1000), (500, 3, 7)])
+def test_rope_score_depends_only_on_relative_distance(m, n, shift):
+    """RoPE's defining property: q at m vs k at n scores the same as at m+s vs n+s."""
+    dim = 64
+    q, k = torch.randn(dim), torch.randn(dim)
+    original = _rotate_at(q, m, dim) @ _rotate_at(k, n, dim)
+    shifted = _rotate_at(q, m + shift, dim) @ _rotate_at(k, n + shift, dim)
+    assert original.item() == pytest.approx(shifted.item(), rel=1e-4, abs=1e-4)
+
+
+def test_rope_matches_complex_number_reference():
+    """Independent check: RoPE is multiplication by e^(i * position * theta).
+
+    Pairs dimension j with dimension j + dim/2 (the "rotate half" layout that
+    Hugging Face's Llama uses), turns each pair into a complex number, rotates it
+    and turns it back.
+    """
+    dim, seq_len = 16, 12
+    x = torch.randn(1, 2, seq_len, dim, dtype=torch.float64)
+    cos, sin = precompute_rope_frequencies(dim, seq_len)
+    ours = apply_rope(x, cos.double(), sin.double())
+
+    theta = 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.float64) / dim))
+    angles = torch.outer(torch.arange(seq_len, dtype=torch.float64), theta)
+    z = torch.complex(x[..., : dim // 2], x[..., dim // 2 :]) * torch.polar(torch.ones_like(angles), angles)
+    reference = torch.cat([z.real, z.imag], dim=-1)
+
+    assert torch.allclose(ours, reference, atol=1e-10)
+
+
+def test_rope_matches_huggingface_llama_formula():
+    """Same computation as transformers' LlamaRotaryEmbedding + apply_rotary_pos_emb,
+    written out here so the test does not need the transformers package."""
+    dim, seq_len = 32, 20
+    q = torch.randn(1, 4, seq_len, dim)
+
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+    freqs = torch.outer(torch.arange(seq_len).float(), inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+
+    def rotate_half(x):
+        x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    hf = q * emb.cos() + rotate_half(q) * emb.sin()
+
+    cos, sin = precompute_rope_frequencies(dim, seq_len)
+    assert torch.allclose(apply_rope(q, cos, sin), hf, atol=1e-6)

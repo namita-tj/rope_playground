@@ -1,0 +1,5 @@
+# Tested with torch 2.5, numpy 2.x, matplotlib 3.9, pytest 8 on Python 3.11-3.13
+torch>=2.2
+numpy>=1.26
+matplotlib>=3.8
+pytest>=8.0

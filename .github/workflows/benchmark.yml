@@ -1,33 +1,40 @@
-name: Context Extension Benchmark
+name: Decay Benchmark
 
 on:
   pull_request:
     paths:
-      - "src/**"
       - "attention.py"
       - "positional_encodings.py"
+      - "experiment.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   benchmark:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout Repository
+      - name: Check out code
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
+          cache: pip
 
-      - name: Install Torch
-        run: pip install torch numpy matplotlib
-
-      - name: Run Distance Decay Benchmark
+      - name: Install dependencies
         run: |
-          python experiment.py
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
 
-      - name: Upload Plot Artifact
+      - name: Run distance decay experiment
+        run: python experiment.py
+
+      - name: Upload plot
         uses: actions/upload-artifact@v4
         with:
           name: decay-benchmark-plot
