@@ -39,7 +39,9 @@ i built this to be experimented with. clone it, break it, print the shapes.
 * **`positional_encodings.py`** — the actual math for generating sinusoidal waves and RoPE 2D complex rotations (run it directly for an interactive terminal demo!).
 * **`attention.py`** — building custom Multi-Head Attention ($Q, K, V$ projections and causal masking) completely from scratch.
 * **`sandbox/play_custom_attention.py`** — a step-by-step trace of how a sentence splits across different attention heads.
-* **`experiment.py`** — the final boss. run this to generate a matplotlib chart proving how RoPE decays attention scores over distance compared to the old methods.
+* **`sandbox/inspect_bert_heads.py`** — peek at which word each head of a real BERT model focuses on (needs `pip install transformers`).
+* **`experiment.py`** — the final boss. measures RoPE's long-term decay and saves the plot to `assets/decay_plot.png`.
+* **`tests/`** — 48 checks that the math is actually right (see below).
 
 ---
 
@@ -49,7 +51,7 @@ spin it up locally in a few seconds:
 
 ```bash
 # clone the repo
-git clone [https://github.com/namita-tj/rope_playground.git](https://github.com/namita-tj/rope_playground.git)
+git clone https://github.com/namita-tj/rope_playground.git
 cd rope_playground
 
 # setup virtual environment
@@ -57,4 +59,46 @@ python3 -m venv .venv
 source .venv/bin/activate  # on windows: .venv\Scripts\Activate.ps1
 
 # install dependencies
-pip install torch matplotlib pytest numpy
+pip install -r requirements.txt
+
+# run the experiment and the tests
+python experiment.py
+pytest
+```
+
+---
+
+## \_(o_o)_/ the decay experiment
+
+the RoPE paper promises *long-term decay*: words further apart should matter less. but there's a catch i fell into in the first version of this experiment — **decay only shows up for words that are actually related**. two random, unrelated words already score about 0 at every distance, so there's nothing to decay (my old plot was just noise!).
+
+so `experiment.py` now measures two things, averaged over 1000 random words:
+
+* **same word:** a word compared with *itself* placed d tokens away. without position info this is always 1.0.
+* **unrelated words:** two independent random words d tokens apart.
+
+![RoPE long-term decay](assets/decay_plot.png)
+
+| | distance 0–7 | distance 449–512 |
+| :--- | ---: | ---: |
+| RoPE, same word | 0.83 | 0.23 |
+| RoPE, unrelated words | ~0.00 | ~0.00 |
+
+the same word loses about 70% of its score over 500 tokens: closer copies matter more, exactly as promised. the wiggles come from the fast-spinning clock hands drifting in and out of phase.
+
+---
+
+## [v] is the math actually right?
+
+`pytest` runs 48 checks, including:
+
+* **RoPE's defining property:** the score between positions *m* and *n* only depends on *m − n* (shift both by 1000 and nothing changes).
+* **rotation keeps vector length** — spinning never stretches a word.
+* **matches two independent references:** the complex-number formula `x · e^(i·m·θ)` and Hugging Face Llama's `rotate_half` formula.
+* **my attention == PyTorch's built-in `scaled_dot_product_attention`**, with and without RoPE and causal masking.
+* **the causal mask really hides the future:** changing the last word never changes earlier outputs.
+* **order matters only with position info:** with no encoding, shuffling the words just shuffles the output.
+* **any sentence length works** (an early version of `attention.py` crashed unless the sentence was exactly 2048 tokens — now there's a test so it can't come back).
+
+CI runs all of this on every push.
+
