@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from positional_encodings import get_sinusoidal_encoding, precompute_rope_frequencies, apply_rope
+from positional_encodings import get_sinusoidal_encoding, precompute_rope_frequencies, apply_rope, rope_slice
 
 
 class CustomMultiHeadAttention(nn.Module):
@@ -31,17 +31,20 @@ class CustomMultiHeadAttention(nn.Module):
             self.register_buffer("rope_cos", cos, persistent=False)
             self.register_buffer("rope_sin", sin, persistent=False)
 
-    def forward(self, x: torch.Tensor, causal: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, causal: bool = False, offset: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for Multi-Head Attention.
         Input x shape: (Batch_Size, Sequence_Length, Hidden_Dimension)
+        `offset` is the position of the first token (0 unless continuing a sequence).
         Returns: (Output Tensor, Attention Weights Map)
         """
         B, T, C = x.shape
+        if C != self.d_model:
+            raise ValueError(f"expected hidden size {self.d_model}, got {C}")
         
         # If Sinusoidal, add positional waves directly to input embeddings BEFORE projection
         if self.pos_type == "sinusoidal":
-            pe = get_sinusoidal_encoding(T, C).to(x.device)
+            pe = get_sinusoidal_encoding(offset + T, C)[offset:].to(x.device)
             x = x + pe
             
         # Project -> Reshape (B, T, n_heads, head_dim) -> Transpose (B, n_heads, T, head_dim)
@@ -51,8 +54,10 @@ class CustomMultiHeadAttention(nn.Module):
         
         # If RoPE, apply vector rotation to Q and K AFTER projection
         if self.pos_type == "rope":
-            q = apply_rope(q, self.rope_cos, self.rope_sin)
-            k = apply_rope(k, self.rope_cos, self.rope_sin)
+            # Only the gears for these T positions, not the whole precomputed table
+            cos, sin = rope_slice(self.rope_cos, self.rope_sin, T, offset)
+            q = apply_rope(q, cos, sin)
+            k = apply_rope(k, cos, sin)
             
         # Multiply Q (B, h, T, d_k) by K^T (B, h, d_k, T) -> Scores (B, h, T, T)
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
