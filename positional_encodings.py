@@ -87,6 +87,45 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
 
 
 # =========================================================================
+# THE MINIMALIST: ALiBi (Attention with Linear Biases, Press et al. 2022)
+# =========================================================================
+def get_alibi_slopes(n_heads: int) -> torch.Tensor:
+    """
+    How hard each head punishes distance.
+
+    ALiBi doesn't touch the word vectors at all. It just subtracts
+    `slope * distance` from every attention score. Each head gets its own slope:
+    steep heads only look at close neighbours, gentle heads can look far back.
+    With 8 heads the slopes are 1/2, 1/4, ..., 1/256 (a geometric sequence).
+
+    Exactly the formula from the paper's official code, including its rule for
+    head counts that are not a power of two.
+    """
+    def power_of_2_slopes(n: int) -> list[float]:
+        start = 2 ** (-(2 ** -(math.log2(n) - 3)))
+        return [start * start**i for i in range(n)]
+
+    if math.log2(n_heads).is_integer():
+        slopes = power_of_2_slopes(n_heads)
+    else:
+        closest = 2 ** math.floor(math.log2(n_heads))
+        slopes = power_of_2_slopes(closest) + get_alibi_slopes(2 * closest).tolist()[0::2][: n_heads - closest]
+    return torch.tensor(slopes, dtype=torch.float)
+
+
+def get_alibi_bias(n_heads: int, seq_len: int, device=None) -> torch.Tensor:
+    """
+    The penalty added to the attention scores, shaped [n_heads, seq_len, seq_len].
+
+    bias[h, i, j] = -slope[h] * |i - j|  -> 0 on the diagonal, more negative further away.
+    It only depends on the distance, so no table is needed and any length works.
+    """
+    pos = torch.arange(seq_len, device=device)
+    distance = (pos[:, None] - pos[None, :]).abs().float()
+    return -get_alibi_slopes(n_heads).to(device)[:, None, None] * distance
+
+
+# =========================================================================
 # TRUE INTERACTIVE DEMO: THE CAROUSEL (Runs if you execute this file!)
 # =========================================================================
 if __name__ == "__main__":
