@@ -43,7 +43,8 @@ i built this to be experimented with. clone it, break it, print the shapes.
 * **`experiment.py`** — measures RoPE's long-term decay and saves the plot to `assets/decay_plot.png`.
 * **`model.py`, `data.py`, `train.py`** — a tiny GPT (~0.8M parameters) that reads Tiny Shakespeare one character at a time, plus its data and training loop.
 * **`study.py`** — the actual final boss. trains that GPT with 4 different ways of handling position and checks what happens when the text gets longer than anything it trained on (see below).
-* **`tests/`** — 95 checks that the math is actually right.
+* **`extend.py`** — session 3: tries Position Interpolation, NTK scaling and YaRN, the tricks real LLMs use to stretch RoPE to longer texts (results coming).
+* **`tests/`** — 111 checks that the math is actually right.
 
 ---
 
@@ -127,7 +128,7 @@ one thing i learned the hard way: in my first version, sinusoidal looked terribl
 
 ## [v] is the math actually right?
 
-`pytest` runs 95 checks, including:
+`pytest` runs 111 checks, including:
 
 * **RoPE's defining property:** the score between positions *m* and *n* only depends on *m − n* (shift both by 1000 and nothing changes).
 * **rotation keeps vector length** — spinning never stretches a word.

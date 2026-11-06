@@ -89,6 +89,13 @@ class TinyGPT(nn.Module):
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
+    def set_rope_scaling(self, method: str | None = None, factor: float = 1.0, original_max_len: int = 256) -> None:
+        """Stretches RoPE in every layer (PI, NTK or YaRN); method=None goes back to plain RoPE."""
+        if self.cfg.pos_type != "rope":
+            raise ValueError(f"RoPE scaling needs a RoPE model, this one uses {self.cfg.pos_type!r}")
+        for block in self.blocks:
+            block.attn.set_rope_scaling(method, factor, original_max_len)
+
     def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None, need_weights: bool = False):
         """idx: [batch, seq_len] character ids. Returns (logits, loss or None, attention maps or None)."""
         B, T = idx.shape
