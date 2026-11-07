@@ -43,7 +43,8 @@ i built this to be experimented with. clone it, break it, print the shapes.
 * **`experiment.py`** — measures RoPE's long-term decay and saves the plot to `assets/decay_plot.png`.
 * **`model.py`, `data.py`, `train.py`** — a tiny GPT (~0.8M parameters) that reads Tiny Shakespeare one character at a time, plus its data and training loop.
 * **`study.py`** — the actual final boss. trains that GPT with 4 different ways of handling position and checks what happens when the text gets longer than anything it trained on (see below).
-* **`tests/`** — 95 checks that the math is actually right.
+* **`extend.py`** — session 3: tries Position Interpolation, NTK scaling and YaRN, the tricks real LLMs use to stretch RoPE to longer texts (results below).
+* **`tests/`** — 111 checks that the math is actually right.
 
 ---
 
@@ -121,13 +122,60 @@ what i had predicted, and what actually happened:
 * **"everything gets worse beyond the training length, ALiBi the least"**: half wrong, in a good way. ALiBi doesn't get worse at all. it gets very slightly *better* with more context. RoPE, the best model at 256 characters, falls apart the hardest: almost 7x worse at 8x the length.
 * **the surprise**: the model with *no* position info degrades less than both sinusoidal and RoPE (3.6x vs 5.7x and 7x). my guess: it never learned to depend on exact positions, so it has less to lose when they go out of range. but its results also jump around a lot between seeds, so i wouldn't lean on that too hard.
 
-this is exactly why real models can't just be run on longer text than they trained on. the next step (session 3) is to try the tricks that llama and qwen use to stretch RoPE to longer contexts (position interpolation, NTK scaling and YaRN) and see how much of that damage they undo.
+this is exactly why real models can't just be run on longer text than they trained on. so in session 3 i tried the tricks that llama and qwen use to stretch RoPE to longer contexts (next section).
 
 one thing i learned the hard way: in my first version, sinusoidal looked terrible (perplexity ~28 vs ~11 in a quick check). it wasn't the method. the waves were way louder than the word vectors (up to 50x) and drowned them out. i tested three ways of scaling them, picked the one that trained best, and used the same setup for every method. one scaling detail changed the result by almost 3x, which is a good reminder to check the setup before trusting a comparison.
 
+## (^_^) stretching RoPE: can the llama tricks fix it?
+
+RoPE fell apart on longer text because its slow clock hands end up at angles the model never saw during training. real LLMs don't retrain from scratch to fix that, they stretch the clock. i implemented the three common ways in `positional_encodings.py`:
+
+* **position interpolation (PI)**: slow *every* hand down by the stretch factor, so position 1024 looks like position 256 did in training. simple, but neighbouring characters also end up closer together than the model is used to.
+* **NTK scaling**: change the base instead, so the fast hands (local detail) barely move and the slow hands (long distances) slow down the most.
+* **YaRN**: decide per hand. hands that go round many times keep their speed, hands that go round less than once get interpolated like PI, the ones in between are blended. it also sharpens attention a little, since longer text spreads it thinner.
+
+i retrained the RoPE model (same setup as above, 3 seeds) and tested each trick two ways:
+
+1. **zero-shot**: no extra training at all, just stretch by (text length / 256).
+2. **fine-tuned**: 300 extra training steps on 1024-character text with the stretch switched on (factor 4). that's how long-context LLMs are actually made.
+
+![RoPE stretching methods vs text length](assets/extension.png)
+
+**zero-shot** (perplexity, lower is better):
+
+| method | 256 (trained) | 512 (2x) | 1024 (4x) | 2048 (8x) |
+| :--- | ---: | ---: | ---: | ---: |
+| RoPE, no stretch | 4.39 | 7.36 | 17.09 | 30.56 |
+| position interpolation | 4.39 | 17.02 | 41.39 | 53.50 |
+| NTK scaling | 4.39 | 4.95 | 7.10 | 11.84 |
+| YaRN | 4.39 | **4.89** | **5.87** | **7.66** |
+
+**after the short fine-tune on 1024-character text:**
+
+| method | 256 | 512 | 1024 | 2048 |
+| :--- | ---: | ---: | ---: | ---: |
+| RoPE, no stretch | 4.45 | 4.41 | 4.39 | **5.21** |
+| position interpolation | 4.58 | 4.54 | 4.52 | 10.74 |
+| NTK scaling | 4.44 | 4.40 | 4.38 | 7.75 |
+| YaRN | 4.44 | 4.41 | 4.38 | 8.96 |
+
+ALiBi from the last section, with no tricks and no extra training: 4.39 at 2048. averages over 3 seeds, full numbers with standard deviations in [`results/extension/summary.md`](results/extension/summary.md).
+
+what i took from it:
+
+* **without any extra training, YaRN wins clearly.** at 8x the length it brings perplexity down from 30.6 to 7.7, which undoes 88% of RoPE's breakdown. NTK scaling undoes 72%.
+* **position interpolation on its own makes things worse,** almost twice as bad as doing nothing (53.5 vs 30.6). squeezing every hand also squeezes the fast ones that tell neighbouring characters apart, and a character-level model lives on exactly that local detail. this is also why the PI paper fine-tunes after interpolating.
+* **after fine-tuning, the trick matters much less than the training.** at 1024 characters every method is back to about 4.4. the surprise: plain RoPE, fine-tuned on longer text *without* any stretching, holds up best at 2048. my guess is that the stretched models were set up for 4x (1024), so 2048 is out of range for them again, while plain RoPE just learned to deal with positions it hadn't seen.
+* **PI pays a small price even at the training length** after fine-tuning (4.58 vs 4.45), the same squeezing problem again.
+* **ALiBi is still the only one that needs nothing.** no stretching, no fine-tuning, and it's as good at 8x as everything else is at 4x after fine-tuning.
+
+a lesson about my own process: a quick 600-step check on a CPU before this run said YaRN made things *worse*. on the real model it's the clear winner. tiny smoke tests are good for catching bugs, not for drawing conclusions.
+
+what i'd try next: fine-tune with the stretch factor matched to the test length (8x), and "dynamic" scaling that picks the factor from the text length, which is what most inference libraries do.
+
 ## [v] is the math actually right?
 
-`pytest` runs 95 checks, including:
+`pytest` runs 111 checks, including:
 
 * **RoPE's defining property:** the score between positions *m* and *n* only depends on *m − n* (shift both by 1000 and nothing changes).
 * **rotation keeps vector length** — spinning never stretches a word.

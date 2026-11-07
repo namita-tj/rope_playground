@@ -56,6 +56,69 @@ def rope_slice(cos: torch.Tensor, sin: torch.Tensor, seq_len: int, offset: int =
         )
     return cos[offset:end], sin[offset:end]
 
+# =========================================================================
+# THE STRETCH: making RoPE read texts longer than it trained on
+# =========================================================================
+ROPE_SCALINGS = ("pi", "ntk", "yarn")
+
+
+def scaled_rope_frequencies(
+    dim: int,
+    max_seq_len: int,
+    method: str | None,
+    factor: float,
+    original_max_len: int,
+    base: float = 10000.0,
+    beta_fast: float = 32.0,
+    beta_slow: float = 1.0,
+):
+    """
+    RoPE gears for a text `factor` times longer than the training length.
+
+    The problem: beyond the training length, the slow clock hands point to angles
+    the model has never seen. Three fixes, all of which only change the gears:
+
+    * "pi"   Position Interpolation (Chen et al., 2023): slow EVERY hand down by
+             `factor`, so position 1024 looks like position 256 did in training.
+             Cost: neighbouring words also end up closer together than usual.
+    * "ntk"  NTK-aware scaling (bloc97, 2023): stretch the base instead, so the
+             fast hands barely change (local detail kept) and the slow hands slow
+             down the most.
+    * "yarn" YaRN (Peng et al., 2023): decide per hand. Hands that turn many times
+             within the training length keep their speed, hands that turn less than
+             once get interpolated like PI, the ones in between are blended. It also
+             sharpens attention a little, because longer texts spread it thinner.
+
+    factor <= 1 or method None gives plain RoPE. Returns (cos, sin) like
+    precompute_rope_frequencies; for YaRN they include the attention temperature.
+    """
+    if method is None or factor <= 1:
+        return precompute_rope_frequencies(dim, max_seq_len, base)
+    if method not in ROPE_SCALINGS:
+        raise ValueError(f"unknown RoPE scaling {method!r}, expected one of {ROPE_SCALINGS}")
+    if dim % 2 != 0:
+        raise ValueError(f"RoPE needs an even dimension to form pairs, got {dim}")
+
+    exponents = torch.arange(0, dim, 2).float() / dim
+    inv_freq = 1.0 / (base ** exponents)
+    mscale = 1.0
+    if method == "pi":
+        inv_freq = inv_freq / factor
+    elif method == "ntk":
+        stretched_base = base * factor ** (dim / (dim - 2))
+        inv_freq = 1.0 / (stretched_base ** exponents)
+    else:  # yarn
+        wavelength = 2 * math.pi / inv_freq
+        turns = original_max_len / wavelength  # how often each hand goes round in training
+        keep = ((turns - beta_slow) / (beta_fast - beta_slow)).clamp(0.0, 1.0)  # 1 = keep speed, 0 = interpolate
+        inv_freq = (1 - keep) * inv_freq / factor + keep * inv_freq
+        mscale = 0.1 * math.log(factor) + 1.0
+
+    t = torch.arange(max_seq_len, dtype=torch.float)
+    freqs = torch.outer(t, inv_freq)
+    return torch.cos(freqs) * mscale, torch.sin(freqs) * mscale
+
+
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """
     The Magic Trick: Spinning the vectors!
